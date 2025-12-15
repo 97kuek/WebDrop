@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebP2P Drop</title>
+    <style>
+        /* --- デザイン設定 (iOS風のスタイル) --- */
+        :root {
+            --primary: #007AFF;
+            /* iOS Blue */
+            --bg: #F2F2F7;
+            /* 背景色 */
+            --card: #FFFFFF;
+            /* カードの白 */
+            --text: #1C1C1E;
+            /* 文字色 */
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        h2 {
+            margin-bottom: 10px;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 400px;
+            /* スマホで見やすい幅に制限 */
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            /* 要素間の隙間 */
+        }
+
+        /* パネル(カード)のデザイン */
+        .card {
+            background: var(--card);
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+            text-align: center;
+        }
+
+        /* 接続状態を示す緑の丸ポチ */
+        .status-dot {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: #ccc;
+            /* 未接続はグレー */
+            margin-right: 5px;
+        }
+
+        /* 接続済みクラス (JavaScriptで付け外しする) */
+        .connected {
+            background-color: #34C759;
+            /* 接続時は緑 */
+            box-shadow: 0 0 5px #34C759;
+        }
+
+        /* ボタンの共通スタイル */
+        button {
+            background-color: var(--primary);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 20px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            width: 100%;
+            transition: opacity 0.2s;
+        }
+
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+
+        button:active {
+            opacity: 0.7;
+        }
+
+        /* ファイル選択エリア (点線枠) */
+        .file-upload {
+            border: 2px dashed #ccc;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            cursor: pointer;
+        }
+
+        /* 受信画像のスタイル (アニメーション付き) */
+        #imageArea img {
+            max-width: 100%;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            animation: popIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+
+        /* ログ表示エリア */
+        #logs {
+            font-size: 10px;
+            color: #666;
+            height: 100px;
+            overflow-y: scroll;
+            text-align: left;
+            border-top: 1px solid #eee;
+            margin-top: 10px;
+            padding-top: 10px;
+        }
+
+        @keyframes popIn {
+            from {
+                transform: scale(0.8);
+                opacity: 0;
+            }
+
+            to {
+                transform: scale(1);
+                opacity: 1;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h2>WebDrop</h2>
+
+        <div class="card">
+            <div style="margin-bottom: 10px; font-weight: bold;">
+                <span id="statusDot" class="status-dot"></span>
+                <span id="statusText">Disconnected</span>
+            </div>
+            <button id="connectBtn" onclick="startConnection()">Find partner (Connect)</button>
+            <p style="font-size: 12px; color: #888;">Tap only one device</p>
+        </div>
+
+        <div class="card">
+            <div class="file-upload" onclick="document.getElementById('fileInput').click()">
+                📁 Tap to select an image
+            </div>
+            <input type="file" id="fileInput" style="display: none;" accept="image/*">
+            <button id="sendBtn" onclick="sendFile()" disabled>Send image</button>
+        </div>
+
+        <div id="imageArea"></div>
+
+        <div id="logs">Communication log...</div>
+    </div>
+
+    <script>
+        // 変数の定義
+        const SIGNALING_URL = 'ws://localhost:8000/ws';                 // server.pyで指定したURL
+        const STUN_SERVER = { urls: 'stun:stun.l.google.com:19302' };   // Googleの無料STUNサーバー (自分のグローバルIPを教えてくれる)
+
+        let socket;      // シグナリングサーバーとの回線
+        let peer;        // WebRTCの接続管理オブジェクト (代理人)
+        let dataChannel; // データを送るための土管 (P2Pパイプ)
+
+        // ログを表示する関数
+        function log(text) {
+            const el = document.getElementById('logs');         // ログ表示エリア
+            el.innerHTML = `<div>${text}</div>` + el.innerHTML; // 新しいログを上に追記
+        }
+
+        // 画面のステータス表示を更新する関数
+        function updateStatus(connected) {
+            const dot = document.getElementById('statusDot');
+            const text = document.getElementById('statusText');
+            const btn = document.getElementById('sendBtn');
+            if (connected) {
+                dot.classList.add('connected');
+                text.innerText = "Connected";
+                text.style.color = "#34C759";
+                btn.disabled = false; // 送信ボタン有効化
+                document.getElementById('connectBtn').style.display = 'none'; // 接続ボタンはもう不要なので消す
+            } else {
+                dot.classList.remove('connected');
+            }
+        }
+
+        // 1. ページ読み込み時にserver.pyへ接続
+        window.onload = () => {
+            log(`Server URL: ${SIGNALING_URL}`);    // log()でブラウザのログ表示エリアに表示
+            socket = new WebSocket(SIGNALING_URL);  // server.pyへWebSocket接続
+
+            socket.onopen = () => log("Server connection established");
+
+            // サーバーからメッセージが届いた時の処理
+            socket.onmessage = async (event) => {
+                // WebRTCの準備ができていないなら初期化
+                if (!peer) initializePeer();
+
+                try {
+                    const data = JSON.parse(event.data);
+
+                    // A. 相手からSDP(暗号化方式など)が届いた場合
+                    if (data.sdp) {
+                        await peer.setRemoteDescription(new RTCSessionDescription(data.sdp));   // 相手の情報をセット
+
+                        // もし相手からの「申し込み(Offer)」だったら、「承諾(Answer)」を作って返す
+                        if (data.sdp.type === 'offer') {
+                            const answer = await peer.createAnswer();
+                            await peer.setLocalDescription(answer);
+                            // サーバー経由で返送
+                            socket.send(JSON.stringify({ sdp: answer }));
+                            log("Answerを送信");
+                        }
+                    }
+                    // B. 相手からICE Candidate(通信経路の候補)が届いた場合
+                    else if (data.candidate) {
+                        await peer.addIceCandidate(new RTCIceCandidate(data.candidate));       // 通信経路の候補を追加
+                    }
+                } catch (e) { console.error(e); }
+            };
+        };
+
+        // --- 2. WebRTCオブジェクト(peer)の準備 ---
+        function initializePeer() {
+            // WebRTC接続を作成
+            peer = new RTCPeerConnection({ iceServers: [STUN_SERVER] });
+
+            // ★イベント: 自分の「住所候補」が見つかったら、サーバー経由で相手に送る
+            peer.onicecandidate = (e) => {
+                if (e.candidate) socket.send(JSON.stringify({ candidate: e.candidate }));
+            };
+
+            // ★イベント: 相手から「データチャネル(土管)」が接続されたら(受信側)
+            peer.ondatachannel = (e) => setupDataChannel(e.channel);
+        }
+
+        // --- 3. 接続開始ボタンを押した時の処理 (発信側) ---
+        async function startConnection() {
+            initializePeer();
+
+            // 自分からデータチャネル(土管)を作る
+            dataChannel = peer.createDataChannel("file-transfer");
+            setupDataChannel(dataChannel); // 自分の土管を設定
+
+            // Offer(接続の申し込み)を作成
+            const offer = await peer.createOffer();
+            await peer.setLocalDescription(offer);
+
+            // サーバー経由で相手にOfferを送る
+            socket.send(JSON.stringify({ sdp: offer }));
+            log("Offer sent");
+        }
+
+        // --- 4. データチャネル(土管)の設定 ---
+        function setupDataChannel(channel) {
+            dataChannel = channel;
+            dataChannel.binaryType = 'arraybuffer'; // デフォルトではバイナリデータを扱えないため、これを指定する
+
+            // P2P接続完了！
+            dataChannel.onopen = () => {
+                log("P2P connection established");
+                updateStatus(true);
+            };
+
+            // データ受信時の処理
+            dataChannel.onmessage = (e) => {
+                // バイナリデータなら画像として処理
+                if (typeof e.data !== 'string') {
+                    // ArrayBufferをBlob(ファイル風オブジェクト)に変換
+                    const blob = new Blob([e.data]);
+                    // ブラウザで表示できるURLを生成
+                    const url = URL.createObjectURL(blob);
+
+                    // imgタグを作って表示
+                    const img = document.createElement('img');
+                    img.src = url;
+
+                    // 古い画像を消して新しい画像を表示
+                    const area = document.getElementById('imageArea');
+                    area.innerHTML = '';
+                    area.appendChild(img);
+                    log(`Image received (${e.data.byteLength} bytes)`);
+                }
+            };
+        }
+
+        // --- 5. ファイル送信処理 ---
+        function sendFile() {
+            const file = document.getElementById('fileInput').files[0];
+            if (!file) return alert("Select an image");
+
+            // ファイルを読み込むリーダーを作成
+            const reader = new FileReader();
+
+            // 読み込み完了後に実行される処理
+            reader.onload = (e) => {
+                // e.target.result にはファイルのバイナリデータ(ArrayBuffer)が入っている
+                dataChannel.send(e.target.result); // P2Pで直接送信！
+                log("Image sent");
+            };
+
+            // ファイルをArrayBufferとして読み込む
+            reader.readAsArrayBuffer(file);
+        }
+
+        // おまけ: ファイル選択時にファイル名をログに出す
+        document.getElementById('fileInput').addEventListener('change', function () {
+            if (this.files[0]) log(`Selected: ${this.files[0].name}`);
+        });
+    </script>
+</body>
+
+</html>
